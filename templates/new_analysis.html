@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}New Analysis - AI Accounts Assistant{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Start New Debt Analysis</h1>
+</div>
+
+<div class="card">
+    <h2>CSV File Source</h2>
+
+    <form action="{{ url_for('start_analysis') }}" method="POST">
+        <div class="form-group">
+            {% if csv_exists %}
+            <div class="option-card selected" onclick="selectOption(this, 'false')">
+                <input type="radio" name="use_local" value="false" checked>
+                <div class="option-content">
+                    <h3>Teleos CSV File</h3>
+                    <p class="text-muted">{{ csv_path }}</p>
+                    <span class="badge badge-success">Available</span>
+                </div>
+            </div>
+            {% else %}
+            <div class="option-card disabled">
+                <input type="radio" name="use_local" value="false" disabled>
+                <div class="option-content">
+                    <h3>Teleos CSV File</h3>
+                    <p class="text-muted">{{ csv_path }}</p>
+                    <span class="badge badge-danger">Not Found</span>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if local_csv_exists %}
+            <div class="option-card {% if not csv_exists %}selected{% endif %}" onclick="selectOption(this, 'true')">
+                <input type="radio" name="use_local" value="true" {% if not csv_exists %}checked{% endif %}>
+                <div class="option-content">
+                    <h3>Local Sample File</h3>
+                    <p class="text-muted">mdebtor.csv in project directory</p>
+                    <span class="badge badge-info">Sample Data</span>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="test_mode" id="test_mode" onchange="toggleTestLimit()">
+                Test mode (limit number of accounts)
+            </label>
+            <div id="test-limit-container" style="display: none; margin-top: 0.5rem;">
+                <label for="account_limit">Accounts to process:</label>
+                <input type="number" name="account_limit" id="account_limit" class="form-control"
+                       value="10" min="1" max="100" style="width: 100px; display: inline-block;">
+            </div>
+        </div>
+
+        <div class="form-actions">
+            <a href="{{ url_for('index') }}" class="btn btn-secondary">Cancel</a>
+            <button type="submit" class="btn btn-primary" {% if not csv_exists and not local_csv_exists %}disabled{% endif %}>
+                Start Analysis
+            </button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h2>What This Analysis Will Do</h2>
+    <ol class="steps-list">
+        <li>Load the debt CSV file</li>
+        <li>For each account, query Teleos for financial details</li>
+        <li>Use AI to categorize each account (MED, PAY, INS, etc.)</li>
+        <li>Generate an Excel file with TYPE and NOTES columns filled in</li>
+    </ol>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function selectOption(element, value) {
+    document.querySelectorAll('.option-card').forEach(card => {
+        card.classList.remove('selected');
+    });
+    element.classList.add('selected');
+    element.querySelector('input[type="radio"]').checked = true;
+}
+
+function toggleTestLimit() {
+    const checkbox = document.getElementById('test_mode');
+    const container = document.getElementById('test-limit-container');
+    container.style.display = checkbox.checked ? 'block' : 'none';
+}
+</script>
+{% endblock %}

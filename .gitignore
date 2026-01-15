@@ -1,0 +1,31 @@
+# Token
+.github_token
+
+# Environment
+.env
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Database
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Output files
+output/
+
+# Screenshots and temp files
+*.jpg
+*.xlsx
+*.csv
+*.txt
+
+# Claude
+.claude/

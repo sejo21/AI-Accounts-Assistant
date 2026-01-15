@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}Analysis Progress - AI Accounts Assistant{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Analysis in Progress</h1>
+</div>
+
+<div class="card">
+    <div class="progress-container">
+        <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+        </div>
+        <div class="progress-text">
+            <span id="progress-current">0</span> / <span id="progress-total">0</span> accounts
+        </div>
+        <p id="progress-message" class="text-center text-muted">Starting analysis...</p>
+    </div>
+</div>
+
+<div class="card">
+    <h3>Categories Being Assigned</h3>
+    <div class="category-legend">
+        <div class="legend-item">
+            <span class="legend-color" style="background: #E8F5E9"></span>
+            <span>MED - Medication awaiting collection</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #C8E6C9"></span>
+            <span>MED READY - Medication ready, client notified</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #FFECB3"></span>
+            <span>PAY - Payment required</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #E3F2FD"></span>
+            <span>PAID - Balance now zero</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #F3E5F5"></span>
+            <span>INS - Insurance claim</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-color" style="background: #FFCDD2"></span>
+            <span>SMJ - Needs human review</span>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const runId = {{ run_id }};
+
+function updateProgress() {
+    fetch(`/api/progress/${runId}`)
+        .then(response => response.json())
+        .then(data => {
+            const current = data.current || 0;
+            const total = data.total || 1;
+            const percent = total > 0 ? (current / total * 100) : 0;
+
+            document.getElementById('progress-fill').style.width = percent + '%';
+            document.getElementById('progress-current').textContent = current;
+            document.getElementById('progress-total').textContent = total;
+            document.getElementById('progress-message').textContent = data.message || '';
+
+            if (data.status === 'completed') {
+                window.location.href = `/run/${runId}`;
+            } else if (data.status === 'error') {
+                document.getElementById('progress-message').textContent = data.message;
+                document.getElementById('progress-message').classList.add('text-danger');
+            } else {
+                setTimeout(updateProgress, 1000);
+            }
+        })
+        .catch(err => {
+            console.error('Error fetching progress:', err);
+            setTimeout(updateProgress, 2000);
+        });
+}
+
+updateProgress();
+</script>
+{% endblock %}

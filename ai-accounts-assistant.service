@@ -1,0 +1,21 @@
+[Unit]
+Description=AI Accounts Assistant - Debt Analysis Tool
+After=network.target
+
+[Service]
+Type=simple
+User=sejo
+Group=sejo
+WorkingDirectory=/home/sejo/AI-Accounts-Assistant
+Environment="PATH=/home/sejo/AI-Accounts-Assistant/venv/bin:/usr/bin"
+ExecStart=/home/sejo/AI-Accounts-Assistant/venv/bin/python app.py
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-accounts-assistant
+
+[Install]
+WantedBy=multi-user.target

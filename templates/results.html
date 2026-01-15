@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+
+{% block title %}Results - AI Accounts Assistant{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Analysis Results</h1>
+    <div class="header-actions">
+        <a href="{{ url_for('download_excel', run_id=run.id) }}" class="btn btn-primary">Download Excel</a>
+        <a href="{{ url_for('new_analysis') }}" class="btn btn-secondary">New Analysis</a>
+    </div>
+</div>
+
+<div class="summary-cards">
+    <div class="summary-card">
+        <h3>Total Accounts</h3>
+        <div class="summary-value">{{ summary.total_accounts }}</div>
+    </div>
+    <div class="summary-card">
+        <h3>Total Value</h3>
+        <div class="summary-value">&pound;{{ "%.2f"|format(summary.total_value or 0) }}</div>
+    </div>
+    <div class="summary-card">
+        <h3>Completed</h3>
+        <div class="summary-value">{{ run.completed_at[:16].replace('T', ' ') if run.completed_at else 'N/A' }}</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>By Category</h2>
+    <div class="category-breakdown">
+        {% for cat, data in summary.by_category.items() %}
+        <div class="category-item category-{{ cat.replace(' ', '-')|lower }}">
+            <span class="category-name">{{ cat }}</span>
+            <span class="category-count">{{ data.count }}</span>
+            <span class="category-value">&pound;{{ "%.2f"|format(data.value or 0) }}</span>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<div class="card">
+    <h2>Accounts</h2>
+
+    <div class="filter-bar">
+        <label>Filter by category:</label>
+        <select id="category-filter" onchange="filterAccounts()">
+            <option value="">All</option>
+            <option value="MED">MED</option>
+            <option value="MED READY">MED READY</option>
+            <option value="PAY">PAY</option>
+            <option value="PAID">PAID</option>
+            <option value="INS">INS</option>
+            <option value="SMJ">SMJ</option>
+            <option value="BAD">BAD</option>
+            <option value="INV">INV</option>
+            <option value="STAFF">STAFF</option>
+        </select>
+    </div>
+
+    <table class="table" id="accounts-table">
+        <thead>
+            <tr>
+                <th>Client ID</th>
+                <th>Name</th>
+                <th>Staff</th>
+                <th>Dept</th>
+                <th>Balance</th>
+                <th>Aging</th>
+                <th>Type</th>
+                <th>Notes</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for account in accounts %}
+            <tr data-category="{{ account.category }}">
+                <td>{{ account.client_id }}</td>
+                <td>{{ account.client_name }}</td>
+                <td>
+                    <input type="checkbox" class="staff-tick"
+                           {% if account.category == 'STAFF' %}checked{% endif %}
+                           onchange="toggleStaff({{ account.id }}, this.checked)">
+                </td>
+                <td>{{ account.department_code or '' }}</td>
+                <td>&pound;{{ "%.2f"|format(account.total_balance) }}</td>
+                <td>
+                    {% if account.days_90 > 0 %}
+                    <span class="badge badge-danger">90+ Days</span>
+                    {% elif account.days_60 > 0 %}
+                    <span class="badge badge-warning">60 Days</span>
+                    {% elif account.days_30 > 0 %}
+                    <span class="badge badge-info">30 Days</span>
+                    {% else %}
+                    <span class="badge badge-success">Current</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <span class="category-badge category-{{ account.category.replace(' ', '-')|lower if account.category else 'unknown' }}">
+                        {{ account.category or 'Unknown' }}
+                    </span>
+                </td>
+                <td class="notes-cell">{{ account.notes or '' }}</td>
+                <td>
+                    <button class="btn btn-sm" onclick="editAccount({{ account.id }}, '{{ account.category }}', '{{ account.notes|e }}')">Edit</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Edit Modal -->
+<div id="edit-modal" class="modal">
+    <div class="modal-content">
+        <h3>Edit Account Category</h3>
+        <form id="edit-form">
+            <input type="hidden" id="edit-account-id">
+            <div class="form-group">
+                <label>Category</label>
+                <select id="edit-category" class="form-control">
+                    <option value="MED">MED</option>
+                    <option value="MED READY">MED READY</option>
+                    <option value="PAY">PAY</option>
+                    <option value="PAID">PAID</option>
+                    <option value="INS">INS</option>
+                    <option value="SMJ">SMJ</option>
+                    <option value="STAFF">STAFF</option>
+                    <option value="BAD">BAD</option>
+                    <option value="INV">INV</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Notes</label>
+                <textarea id="edit-notes" class="form-control" rows="3"></textarea>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function filterAccounts() {
+    const filter = document.getElementById('category-filter').value;
+    const rows = document.querySelectorAll('#accounts-table tbody tr');
+
+    rows.forEach(row => {
+        if (!filter || row.dataset.category === filter) {
+            row.style.display = '';
+        } else {
+            row.style.display = 'none';
+        }
+    });
+}
+
+function editAccount(accountId, category, notes) {
+    document.getElementById('edit-account-id').value = accountId;
+    document.getElementById('edit-category').value = category || 'SMJ';
+    document.getElementById('edit-notes').value = notes || '';
+    document.getElementById('edit-modal').style.display = 'flex';
+}
+
+function closeModal() {
+    document.getElementById('edit-modal').style.display = 'none';
+}
+
+document.getElementById('edit-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const accountId = document.getElementById('edit-account-id').value;
+    const category = document.getElementById('edit-category').value;
+    const notes = document.getElementById('edit-notes').value;
+
+    fetch(`/api/account/${accountId}/update`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({category, notes})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            location.reload();
+        } else {
+            alert('Error updating account');
+        }
+    });
+});
+
+// Close modal when clicking outside
+document.getElementById('edit-modal').addEventListener('click', function(e) {
+    if (e.target === this) {
+        closeModal();
+    }
+});
+
+// Toggle staff status
+function toggleStaff(accountId, isStaff) {
+    if (isStaff) {
+        fetch(`/api/account/${accountId}/update`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({category: 'STAFF', notes: 'Staff account'})
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                location.reload();
+            } else {
+                alert('Error marking as staff');
+            }
+        });
+    } else {
+        // Unmark as staff - set to SMJ for manual review
+        fetch(`/api/account/${accountId}/unmark-staff`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'}
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                location.reload();
+            } else {
+                alert('Error unmarking staff');
+            }
+        });
+    }
+}
+</script>
+{% endblock %}
