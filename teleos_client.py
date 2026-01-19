@@ -209,14 +209,59 @@ class TeleosClient:
 
         return False
 
+    def get_payment_allocations(self, client_id: int) -> Dict[int, float]:
+        """
+        Get payment allocations for a client's transactions.
+
+        Returns dict mapping TransactionID -> total amount allocated (paid).
+        Also accounts for reversed allocations.
+        """
+        # Get allocations
+        alloc_query = f"""
+        SELECT TransactionID, SUM(Amount) as AllocatedAmount
+        FROM paymentallocations
+        WHERE ClientID = {int(client_id)}
+        AND TransactionID IS NOT NULL
+        GROUP BY TransactionID
+        """
+        allocations = self.execute_custom_query(alloc_query)
+
+        # Get reversed allocations (to subtract)
+        reversed_query = f"""
+        SELECT TransactionID, SUM(Amount) as ReversedAmount
+        FROM `paymentallocations:reversed`
+        WHERE ClientID = {int(client_id)}
+        AND TransactionID IS NOT NULL
+        GROUP BY TransactionID
+        """
+        reversed_allocs = self.execute_custom_query(reversed_query)
+
+        # Build allocation map
+        alloc_map = {}
+        for row in allocations:
+            txn_id = row.get('TransactionID')
+            if txn_id:
+                alloc_map[txn_id] = float(row.get('AllocatedAmount', 0) or 0)
+
+        # Subtract reversed allocations
+        for row in reversed_allocs:
+            txn_id = row.get('TransactionID')
+            if txn_id and txn_id in alloc_map:
+                alloc_map[txn_id] -= float(row.get('ReversedAmount', 0) or 0)
+
+        return alloc_map
+
     def get_unpaid_transactions(self, client_id: int) -> List[dict]:
         """
         Get unpaid transactions for a client from the last 6 months.
 
-        Returns transactions where the item has not been invoiced yet.
-        Items with Invoiced=0 are awaiting payment at collection.
-        Ignores items older than 6 months as these may be legacy data.
+        Uses payment allocations table for accurate paid/unpaid status.
+        Falls back to Invoiced/Paid flags if no allocation data.
+
+        Returns transactions that contribute to the outstanding balance.
+        Includes Stock_or_Procedure column for reliable item type detection.
         """
+        # Get all recent transactions with positive value
         query = f"""
         SELECT
             t.Transaction_ID,
@@ -227,25 +272,50 @@ class TeleosClient:
             (t.Net_value + t.VAT_amount) as Total,
             t.Invoiced,
             t.Paid,
-            t.Animal_ID
+            t.Animal_ID,
+            t.Stock_or_Procedure
         FROM transactions t
         WHERE t.Client_ID = {int(client_id)}
-        AND (t.Invoiced = 0 OR t.Invoiced IS NULL)
         AND (t.Net_value + t.VAT_amount) > 0
         AND t.Invoice_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
         ORDER BY t.Invoice_date DESC
         """
-        return self.execute_custom_query(query)
+        transactions = self.execute_custom_query(query)
+
+        # Get payment allocations for this client
+        allocations = self.get_payment_allocations(client_id)
+
+        # Filter to unpaid/partially paid transactions
+        unpaid = []
+        for txn in transactions:
+            txn_id = txn.get('Transaction_ID')
+            total = float(txn.get('Total', txn.get('Net_value', 0)) or 0)
+            allocated = allocations.get(txn_id, 0)
+
+            # Calculate remaining unpaid amount
+            remaining = total - allocated
+
+            if remaining > 0.01:  # More than 1p unpaid
+                # Add remaining amount info
+                txn['Allocated'] = allocated
+                txn['Remaining'] = remaining
+                txn['FullyPaid'] = False
+                unpaid.append(txn)
+
+        return unpaid
 
     def get_outstanding_items(self, client_id: int) -> dict:
         """
         Get items that contribute to the current outstanding balance.
 
-        Simple approach:
+        Smart approach:
         1. Get current balance from clientbalance table
-        2. Get unpaid transactions (Paid=0)
-        3. Compare totals to verify accuracy
-        4. Analyze transaction types
+        2. Get unpaid transactions (Invoiced=0)
+        3. If unpaid total matches current balance, analyze all items
+        4. If mismatch, try to identify which subset of items makes up the balance
+           - Check if stock items alone match the balance (common case: procedures paid, meds pending)
+           - Check if most recent items match the balance
+        5. Analyze only the items that contribute to the actual balance
 
         Returns dict with:
             - items: list of transactions contributing to current balance
@@ -262,50 +332,229 @@ class TeleosClient:
                 'procedure_items': [],
                 'insurance_items': []
             },
-            'balance_match': False
+            'balance_match': False,
+            'balance_explanation': None
         }
 
         # Get current balance from clientbalance table
         current_balance = self.get_client_balance(client_id) or 0
 
-        # Get unpaid transactions (Paid=0)
+        # Get unpaid transactions (Invoiced=0)
         unpaid = self.get_unpaid_transactions(client_id)
-        result['items'] = unpaid
 
         # Calculate total of unpaid items
         unpaid_total = sum(float(t.get('Total', t.get('Net_value', 0)) or 0) for t in unpaid)
 
         # Check if unpaid total roughly matches current balance (within £1 or 10%)
-        if current_balance > 0:
+        if current_balance > 0 and unpaid_total > 0:
             diff = abs(unpaid_total - current_balance)
             if diff < 1.0 or (diff / current_balance) < 0.1:
+                # Good match - analyze all unpaid items
+                result['items'] = unpaid
                 result['balance_match'] = True
+                result['analysis'] = self.analyze_transaction_types(unpaid)
+                return result
 
-        # Analyze the transaction types
+        # Balance mismatch - try to identify which items make up the current balance
+        # This happens when payments were made but individual items weren't marked as paid
+
+        if current_balance > 0 and unpaid:
+            # Strategy 1: Find items that were likely paid by matching the difference
+            # E.g., if unpaid total is £109.80 and current balance is £97.70,
+            # the difference (£12.10) was likely paid - find items matching that amount
+            paid_amount = unpaid_total - current_balance
+            if paid_amount > 0:
+                paid_items, remaining_items = self._find_items_matching_amount(unpaid, paid_amount)
+                if paid_items and remaining_items:
+                    remaining_total = sum(float(t.get('Total', t.get('Net_value', 0)) or 0) for t in remaining_items)
+                    if abs(remaining_total - current_balance) < 1.0:
+                        # Found items that explain the payment - analyze remaining items
+                        paid_desc = ', '.join(t.get('Details', '')[:30] for t in paid_items[:2])
+                        result['items'] = remaining_items
+                        result['balance_match'] = True
+                        result['balance_explanation'] = f'Items likely paid: {paid_desc}'
+                        result['analysis'] = self.analyze_transaction_types(remaining_items)
+                        return result
+
+            # Strategy 2: Check if stock items alone match the current balance
+            # Common case: client paid for procedures but meds are awaiting collection
+            stock_items, procedure_items, other_items = self._categorize_items(unpaid)
+
+            stock_total = sum(float(t.get('Total', t.get('Net_value', 0)) or 0) for t in stock_items)
+            stock_diff = abs(stock_total - current_balance)
+
+            if stock_total > 0 and (stock_diff < 1.0 or (current_balance > 0 and stock_diff / current_balance < 0.15)):
+                # Stock items match the balance - likely procedures were paid
+                result['items'] = stock_items
+                result['balance_match'] = True
+                result['balance_explanation'] = 'Stock items match current balance (procedures likely paid)'
+                result['analysis'] = self.analyze_transaction_types(stock_items)
+                return result
+
+            # Strategy 3: Check most recent items (sorted by date desc)
+            # Items are already sorted by date desc from query
+            running_total = 0
+            matching_items = []
+            for txn in unpaid:
+                amount = float(txn.get('Total', txn.get('Net_value', 0)) or 0)
+                if running_total + amount <= current_balance + 1.0:  # Allow £1 tolerance
+                    matching_items.append(txn)
+                    running_total += amount
+                    if abs(running_total - current_balance) < 1.0:
+                        break
+
+            if matching_items and abs(running_total - current_balance) < 1.0:
+                result['items'] = matching_items
+                result['balance_match'] = True
+                result['balance_explanation'] = 'Most recent items match current balance'
+                result['analysis'] = self.analyze_transaction_types(matching_items)
+                return result
+
+        # Could not determine which items make up the balance - return all for review
+        result['items'] = unpaid
+        result['balance_match'] = False
         result['analysis'] = self.analyze_transaction_types(unpaid)
-
         return result
+
+    def _categorize_items(self, transactions: List[dict]) -> tuple:
+        """
+        Categorize transactions into stock, procedure, and other items.
+
+        Returns tuple of (stock_items, procedure_items, other_items)
+        """
+        import re
+
+        stock_items = []
+        procedure_items = []
+        other_items = []
+
+        # Patterns to skip (non-balance-affecting)
+        skip_patterns = [
+            re.compile(r'^Invoice\s+\d+\s+(created|printed)', re.IGNORECASE),
+            re.compile(r'^Statement\s+\d+\s+(created|printed)', re.IGNORECASE),
+            re.compile(r'^Receipt\s+\d+\s+created', re.IGNORECASE),
+            re.compile(r'^Auth\s*Code:', re.IGNORECASE),
+            re.compile(r'^Card\s*Num:', re.IGNORECASE),
+        ]
+        estimate_pattern = re.compile(r'\(\d+\.\d{2}\)$')
+
+        stock_keywords = [
+            'tablet', 'capsule', 'injection', 'cream', 'ointment', 'drops',
+            'solution', 'suspension', 'wormer', 'flea', 'vaccine', 'prescription',
+            'food', 'diet', 'biscuit', 'treats', 'shampoo', 'spray', 'collar',
+            'mg', 'ml', 'g ', 'kg', 'pack', 'box', 'bottle', 'tube'
+        ]
+
+        for txn in transactions:
+            details = txn.get('Details') or ''
+            details_lower = details.lower()
+            amount = float(txn.get('Total', txn.get('Net_value', 0)) or 0)
+
+            # Skip zero/negative amounts
+            if amount <= 0:
+                continue
+
+            # Skip estimate and non-balance items
+            if estimate_pattern.search(details) or any(p.match(details) for p in skip_patterns):
+                continue
+
+            # Use Stock_or_Procedure column if available
+            item_type = txn.get('Stock_or_Procedure', '').upper()
+
+            if item_type == 'S':
+                stock_items.append(txn)
+            elif item_type == 'P':
+                procedure_items.append(txn)
+            elif item_type == 'N':
+                continue  # Skip notes
+            elif any(kw in details_lower for kw in stock_keywords):
+                stock_items.append(txn)
+            else:
+                procedure_items.append(txn)
+
+        return stock_items, procedure_items, other_items
+
+    def _find_items_matching_amount(self, transactions: List[dict], target_amount: float, tolerance: float = 1.0) -> tuple:
+        """
+        Find a subset of transactions that sum to the target amount.
+
+        Used to identify which items were likely paid when there's a balance mismatch.
+        E.g., if unpaid total is £109.80 and current balance is £97.70,
+        find items totaling £12.10 (the difference) - these were likely paid.
+
+        Returns tuple of (matching_items, remaining_items)
+        """
+        # First, try to find a single item that matches exactly
+        for i, txn in enumerate(transactions):
+            amount = float(txn.get('Total', txn.get('Net_value', 0)) or 0)
+            if abs(amount - target_amount) < tolerance:
+                matching = [txn]
+                remaining = transactions[:i] + transactions[i+1:]
+                return matching, remaining
+
+        # Try to find two items that match
+        for i, txn1 in enumerate(transactions):
+            amt1 = float(txn1.get('Total', txn1.get('Net_value', 0)) or 0)
+            for j, txn2 in enumerate(transactions[i+1:], i+1):
+                amt2 = float(txn2.get('Total', txn2.get('Net_value', 0)) or 0)
+                if abs(amt1 + amt2 - target_amount) < tolerance:
+                    matching = [txn1, txn2]
+                    remaining = [t for k, t in enumerate(transactions) if k != i and k != j]
+                    return matching, remaining
+
+        # Could not find matching items
+        return [], transactions
 
     def analyze_transaction_types(self, transactions: List[dict]) -> dict:
         """
-        Analyze a list of transactions to determine item types.
+        Analyze a list of transactions to determine item types and payment status.
+
+        Uses Stock_or_Procedure column when available (S=Stock, P=Procedure, N=Note).
+        Falls back to keyword matching if column not present.
+
+        Filters out:
+        - Estimate items (prices in parentheses like "(75.00)" at end)
+        - Non-balance-affecting entries (Invoice/Statement/Receipt created, Auth Code, etc.)
+
+        Key distinction:
+        - Stock item, NOT invoiced → MED (awaiting collection)
+        - Stock item, INVOICED but not paid → PAY (they owe money for it)
+        - Procedure items → PAY
 
         Returns dict with:
-            - has_stock_items: bool (medications, products)
+            - has_stock_items: bool (medications, products - NOT invoiced)
+            - has_invoiced_unpaid: bool (items invoiced but not paid - always PAY)
             - has_procedures: bool (consultations, treatments)
             - has_insurance: bool (insurance-related items)
-            - stock_items: list of stock item descriptions
+            - stock_items: list of stock item descriptions (not invoiced)
+            - invoiced_unpaid_items: list of invoiced but unpaid items
             - procedure_items: list of procedure descriptions
             - insurance_items: list of insurance item descriptions
         """
+        import re
+
         result = {
             'has_stock_items': False,
+            'has_invoiced_unpaid': False,
             'has_procedures': False,
             'has_insurance': False,
             'stock_items': [],
+            'invoiced_unpaid_items': [],
             'procedure_items': [],
             'insurance_items': []
         }
+
+        # Regex pattern for estimate items: prices in parentheses at end like "(75.00)"
+        estimate_pattern = re.compile(r'\(\d+\.\d{2}\)$')
+
+        # Patterns for non-balance-affecting entries (reference entries only)
+        skip_patterns = [
+            re.compile(r'^Invoice\s+\d+\s+(created|printed)', re.IGNORECASE),
+            re.compile(r'^Statement\s+\d+\s+(created|printed)', re.IGNORECASE),
+            re.compile(r'^Receipt\s+\d+\s+created', re.IGNORECASE),
+            re.compile(r'^Auth\s*Code:', re.IGNORECASE),
+            re.compile(r'^Card\s*Num:', re.IGNORECASE),
+        ]
 
         # Keywords indicating stock/medication items
         stock_keywords = [
@@ -330,29 +579,60 @@ class TeleosClient:
         ]
 
         for txn in transactions:
-            details = (txn.get('Details') or '').lower()
+            details = txn.get('Details') or ''
+            details_lower = details.lower()
             amount = float(txn.get('Total', txn.get('Net_value', 0)) or 0)
 
             # Skip zero cost items - they don't affect the balance
             if amount <= 0:
                 continue
 
-            # Check for insurance
-            if any(kw in details for kw in insurance_keywords):
+            # Skip estimate items (prices in parentheses at end - these are quotes, not charges)
+            if estimate_pattern.search(details):
+                continue
+
+            # Skip non-balance-affecting entries
+            if any(pattern.match(details) for pattern in skip_patterns):
+                continue
+
+            # Check if this item is INVOICED but NOT PAID - always PAY category
+            is_invoiced = txn.get('Invoiced') == 1 or txn.get('Invoiced') == '1'
+            is_paid = txn.get('Paid') == 1 or txn.get('Paid') == '1'
+
+            if is_invoiced and not is_paid:
+                # Invoiced but unpaid = they owe money for this = PAY
+                result['has_invoiced_unpaid'] = True
+                result['invoiced_unpaid_items'].append(details)
+                continue
+
+            # For non-invoiced items, determine type (stock vs procedure)
+            item_type = txn.get('Stock_or_Procedure', '').upper()
+
+            # Check for insurance first (keyword-based, as no column for this)
+            if any(kw in details_lower for kw in insurance_keywords):
                 result['has_insurance'] = True
-                result['insurance_items'].append(txn.get('Details', ''))
-            # Check for stock items
-            elif any(kw in details for kw in stock_keywords):
+                result['insurance_items'].append(details)
+            # Use Stock_or_Procedure column when available
+            elif item_type == 'S':
                 result['has_stock_items'] = True
-                result['stock_items'].append(txn.get('Details', ''))
-            # Check for procedures
-            elif any(kw in details for kw in procedure_keywords):
+                result['stock_items'].append(details)
+            elif item_type == 'P':
                 result['has_procedures'] = True
-                result['procedure_items'].append(txn.get('Details', ''))
+                result['procedure_items'].append(details)
+            elif item_type == 'N':
+                # Notes don't affect categorization - skip
+                continue
+            # Fall back to keyword matching
+            elif any(kw in details_lower for kw in stock_keywords):
+                result['has_stock_items'] = True
+                result['stock_items'].append(details)
+            elif any(kw in details_lower for kw in procedure_keywords):
+                result['has_procedures'] = True
+                result['procedure_items'].append(details)
             else:
                 # Default to procedure if can't determine
                 result['has_procedures'] = True
-                result['procedure_items'].append(txn.get('Details', ''))
+                result['procedure_items'].append(details)
 
         return result
 

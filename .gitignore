@@ -25,7 +25,10 @@ output/
 *.jpg
 *.xlsx
 *.csv
+
+# Ignore txt files except prompts
 *.txt
+!prompts/*.txt
 
 # Claude
 .claude/

@@ -46,9 +46,24 @@ class DebtAnalyzer:
             return prompt_path.read_text()
         return "Categorize this debt account as MED, MED READY, PAY, INS, or SMJ."
 
+    def _apply_aging_notes(self, result: CategorizationResult, account: DebtAccount) -> CategorizationResult:
+        """Add aging-aware notes for MED/MED READY items that are overdue for collection."""
+        if result.category in ['MED', 'MED READY']:
+            aging = account.aging_category
+            if aging in ['30 Days', '60 Days', '90+ Days']:
+                aging_note = f"Not collected for {aging.lower()} - verify still required"
+                result.notes = f"{result.notes}. {aging_note}" if result.notes else aging_note
+                if not result.action_suggested:
+                    result.action_suggested = "Check if medication still needed"
+        return result
+
     def _build_context(self, account: DebtAccount, teleos_data: dict) -> str:
         """Build context string for AI analysis."""
+        from datetime import date
         lines = []
+
+        # Today's date for context
+        lines.append(f"**Today's Date: {date.today().strftime('%d/%m/%Y')}**\n")
 
         # Basic account info
         lines.append("## Account Information")
@@ -77,38 +92,52 @@ class DebtAnalyzer:
         # Outstanding items (unpaid transactions)
         transactions = teleos_data.get('unpaid_transactions', [])
         balance_match = teleos_data.get('balance_match', False)
+        balance_explanation = teleos_data.get('balance_explanation', '')
 
         lines.append(f"\n## Outstanding Items (Unpaid Transactions)")
+        lines.append("NOTE: Invoice numbers are NOT provided. Do not reference specific invoice numbers.")
+
         if balance_match:
-            lines.append("Note: Unpaid items total matches current balance - high confidence")
+            lines.append("Confidence: HIGH - Unpaid items match current balance")
+            if balance_explanation:
+                lines.append(f"Explanation: {balance_explanation}")
         else:
-            lines.append("Note: Unpaid items may not fully explain current balance - verify manually")
+            lines.append("Confidence: LOW - Unpaid items may not fully explain current balance")
 
         if transactions:
             lines.append(f"\n{len(transactions)} unpaid item(s):")
             for txn in transactions[:10]:  # Limit to 10 for context
                 details = txn.get('Details', 'No details')
-                amount = float(txn.get('Total', txn.get('Net_value', 0)) or 0)
+                total = float(txn.get('Total', txn.get('Net_value', 0)) or 0)
+                allocated = float(txn.get('Allocated', 0) or 0)
+                remaining = float(txn.get('Remaining', total) or total)
                 date = txn.get('Invoice_date', '')
-                invoiced = 'Yes' if txn.get('Invoiced') else 'No'
-                lines.append(f"  - {details} | £{amount:.2f} | Date: {date} | Invoiced: {invoiced}")
+                item_type = txn.get('Stock_or_Procedure', '?')
+
+                # Show allocated/remaining if partial payment
+                if allocated > 0:
+                    lines.append(f"  - {details} | Total: £{total:.2f} | Paid: £{allocated:.2f} | Owing: £{remaining:.2f} | Date: {date} | Type: {item_type}")
+                else:
+                    lines.append(f"  - {details} | Owing: £{remaining:.2f} | Date: {date} | Type: {item_type}")
         else:
-            lines.append("\n## Unpaid Transactions")
             lines.append("  No unpaid transactions found")
 
         # Transaction type analysis
         analysis = teleos_data.get('transaction_analysis', {})
         lines.append(f"\n## Transaction Type Analysis")
-        lines.append(f"Has Stock Items (medications): {analysis.get('has_stock_items', False)}")
+        lines.append(f"Has Invoiced But Unpaid Items: {analysis.get('has_invoiced_unpaid', False)}")
+        lines.append(f"Has Stock Items (medications, not invoiced): {analysis.get('has_stock_items', False)}")
         lines.append(f"Has Procedures (services): {analysis.get('has_procedures', False)}")
         lines.append(f"Has Insurance Items: {analysis.get('has_insurance', False)}")
 
+        if analysis.get('invoiced_unpaid_items'):
+            lines.append(f"\nInvoiced But Unpaid (PAY): {', '.join(analysis['invoiced_unpaid_items'][:5])}")
         if analysis.get('stock_items'):
-            lines.append(f"\nStock Items: {', '.join(analysis['stock_items'][:5])}")
+            lines.append(f"\nStock Items (MED): {', '.join(analysis['stock_items'][:5])}")
         if analysis.get('procedure_items'):
-            lines.append(f"\nProcedure Items: {', '.join(analysis['procedure_items'][:5])}")
+            lines.append(f"\nProcedure Items (PAY): {', '.join(analysis['procedure_items'][:5])}")
         if analysis.get('insurance_items'):
-            lines.append(f"\nInsurance Items: {', '.join(analysis['insurance_items'][:3])}")
+            lines.append(f"\nInsurance Items (INS): {', '.join(analysis['insurance_items'][:3])}")
 
         # SMS history
         sms_history = teleos_data.get('sms_history', [])
@@ -142,7 +171,7 @@ class DebtAnalyzer:
                 confidence='HIGH',
                 notes='Staff account (previously marked)',
                 action_suggested=None,
-                exclude_from_excel=True
+                exclude_from_excel=False  # Include STAFF in Excel for visibility
             )
 
         # First check if this is a known "skip" case
@@ -194,6 +223,7 @@ class DebtAnalyzer:
                 confidence='HIGH',
                 notes=f'Balance is now £{current_balance:.2f} in Teleos - account has been paid.',
                 action_suggested=None,
+                exclude_from_excel=True,  # No action needed - already paid
                 department_code=dept_code
             )
 
@@ -207,7 +237,7 @@ class DebtAnalyzer:
             if dept_code == 'PAY' and rule_result.category != 'PAY':
                 rule_result.category = 'PAY'
                 rule_result.notes = f'PAY account. {rule_result.notes}'
-            return rule_result
+            return self._apply_aging_notes(rule_result, account)
 
         # Use AI for complex cases
         try:
@@ -217,14 +247,14 @@ class DebtAnalyzer:
             if dept_code == 'PAY' and result.category != 'PAY':
                 result.category = 'PAY'
                 result.notes = f'PAY account. {result.notes}'
-            return result
+            return self._apply_aging_notes(result, account)
         except Exception as e:
             # Fall back to rule-based if AI fails
             if rule_result:
                 if dept_code == 'PAY':
                     rule_result.category = 'PAY'
                     rule_result.notes = f'PAY account. {rule_result.notes}'
-                return rule_result
+                return self._apply_aging_notes(rule_result, account)
             return CategorizationResult(
                 client_id=account.client_id,
                 category='PAY' if dept_code == 'PAY' else 'SMJ',
@@ -253,6 +283,20 @@ class DebtAnalyzer:
                 department_code=dept_code
             )
 
+        # INVOICED BUT UNPAID items = PAY (they owe money for something already billed)
+        # This takes priority - even if it's a stock item, if it's been invoiced they need to pay
+        if analysis.get('has_invoiced_unpaid'):
+            invoiced_items = analysis.get('invoiced_unpaid_items', [])
+            item_desc = invoiced_items[0] if invoiced_items else 'items'
+            return CategorizationResult(
+                client_id=account.client_id,
+                category='PAY',
+                confidence='HIGH',
+                notes=f'Invoiced but unpaid: {item_desc}',
+                action_suggested='Send payment reminder',
+                department_code=dept_code
+            )
+
         # Pure insurance case
         if analysis.get('has_insurance') and not analysis.get('has_procedures') and not analysis.get('has_stock_items'):
             return CategorizationResult(
@@ -264,7 +308,7 @@ class DebtAnalyzer:
                 department_code=dept_code
             )
 
-        # Pure medication case
+        # Pure medication case (stock items NOT invoiced - awaiting collection)
         if analysis.get('has_stock_items') and not analysis.get('has_procedures') and not analysis.get('has_insurance'):
             if has_ready_sms:
                 return CategorizationResult(
@@ -320,8 +364,9 @@ Respond with a JSON object only, no other text."""
 
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=500,
-            temperature=0.3,
+            max_tokens=300,  # Reduced - we want brief notes
+            temperature=0.1,  # Low for factual, deterministic output
+            top_p=0.9,  # Focus on most likely tokens
             system=self.system_prompt,
             messages=[{"role": "user", "content": message}]
         )

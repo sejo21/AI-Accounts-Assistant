@@ -6,6 +6,7 @@ from typing import List, Tuple
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.formatting.rule import FormulaRule
 
 from config import config
 from csv_parser import DebtAccount
@@ -78,11 +79,12 @@ def create_debt_excel(
         'SMS',
         'EMAIL',
         'TYPE',
-        'NOTES'
+        'ADMIN NOTES',       # New column for practice manager notes
+        'AI ANALYSIS NOTES'  # Renamed from NOTES
     ]
 
     # Column widths
-    column_widths = [15, 35, 22, 12, 12, 12, 12, 12, 8, 8, 12, 50]
+    column_widths = [15, 35, 22, 12, 12, 12, 12, 12, 8, 8, 12, 25, 50]
 
     # Style definitions
     header_font = Font(bold=True, color='FFFFFF')
@@ -142,7 +144,8 @@ def create_debt_excel(
             '',  # SMS - empty, user fills in
             '',  # EMAIL - empty, user fills in
             category,
-            notes
+            '',  # ADMIN NOTES - empty, practice manager fills in
+            notes  # AI ANALYSIS NOTES
         ]
 
         # Write row
@@ -155,48 +158,66 @@ def create_debt_excel(
                 cell.number_format = '£#,##0.00'
                 cell.alignment = Alignment(horizontal='right')
 
-            # Apply category color
-            if col == 11 and category in CATEGORY_COLORS:
-                cell.fill = PatternFill(
-                    start_color=CATEGORY_COLORS[category],
-                    end_color=CATEGORY_COLORS[category],
-                    fill_type='solid'
-                )
+            # Center and bold the TYPE column (col 11)
+            if col == 11:
                 cell.font = Font(bold=True)
                 cell.alignment = Alignment(horizontal='center')
 
+            # Apply text wrapping to ADMIN NOTES (col 12) and AI ANALYSIS NOTES (col 13)
+            if col in [12, 13]:
+                cell.alignment = Alignment(wrap_text=True, vertical='top')
+
         row_num += 1
 
-    # Add summary section
+    # Add conditional formatting for category colors (columns A-K based on TYPE in column K)
+    # This makes colors update dynamically when the TYPE value is changed
+    last_data_row = row_num - 1  # Last row of data
+    data_range = f"A2:K{last_data_row}"
+
+    for category, color in CATEGORY_COLORS.items():
+        # Formula checks if column K (TYPE) matches the category
+        # Using $K2 to lock the column reference but allow row to vary
+        formula = f'$K2="{category}"'
+        fill = PatternFill(start_color=color, end_color=color, fill_type='solid')
+        rule = FormulaRule(formula=[formula], fill=fill)
+        ws.conditional_formatting.add(data_range, rule)
+
+    # Add summary section with Excel formulas (dynamic updates if user edits data)
     row_num += 2
     ws.cell(row=row_num, column=1, value="Summary").font = Font(bold=True, size=14)
 
     row_num += 1
-    ws.cell(row=row_num, column=1, value=f"Total Accounts: {len(filtered_accounts)}")
+    ws.cell(row=row_num, column=1, value="Total Accounts:")
+    ws.cell(row=row_num, column=2, value=f'=COUNTA(A2:A{last_data_row})')  # Count non-empty IDs
     if len(filtered_accounts) < len(accounts):
         ws.cell(row=row_num, column=3, value=f"({len(accounts) - len(filtered_accounts)} excluded: BAD/INV)")
 
     row_num += 1
-    total_value = sum(a.total_balance for a in filtered_accounts)
-    ws.cell(row=row_num, column=1, value=f"Total Value: £{total_value:,.2f}")
+    ws.cell(row=row_num, column=1, value="Total Value:")
+    ws.cell(row=row_num, column=2, value=f'=SUM(H2:H{last_data_row})')  # Sum of Total column (H)
+    ws.cell(row=row_num, column=2).number_format = '£#,##0.00'
 
-    # Category breakdown (only for included accounts)
+    # Category breakdown with formulas (only for included accounts)
     row_num += 2
     ws.cell(row=row_num, column=1, value="By Category:").font = Font(bold=True)
 
-    category_counts = {}
+    # Get list of categories that actually exist in the data
+    category_list = set()
     for account in filtered_accounts:
         result = results_map.get(account.client_id)
-        if result:
-            cat = result.category
-            if cat not in category_counts:
-                category_counts[cat] = {'count': 0, 'value': 0}
-            category_counts[cat]['count'] += 1
-            category_counts[cat]['value'] += account.total_balance
+        if result and result.category:
+            category_list.add(result.category)
 
-    for cat, data in sorted(category_counts.items()):
+    for cat in sorted(category_list):
         row_num += 1
-        ws.cell(row=row_num, column=1, value=f"  {cat}: {data['count']} accounts, £{data['value']:,.2f}")
+        ws.cell(row=row_num, column=1, value=f"  {cat}:")
+        # Count formula using COUNTIF on TYPE column (K)
+        ws.cell(row=row_num, column=2, value=f'=COUNTIF(K:K,"{cat}")')
+        ws.cell(row=row_num, column=3, value="accounts")
+        # Sum formula using SUMIF on TYPE column (K) and Total column (H)
+        ws.cell(row=row_num, column=4, value=f'=SUMIF(K:K,"{cat}",H:H)')
+        ws.cell(row=row_num, column=4).number_format = '£#,##0.00'
+
         if cat in CATEGORY_COLORS:
             ws.cell(row=row_num, column=1).fill = PatternFill(
                 start_color=CATEGORY_COLORS[cat],
@@ -207,8 +228,8 @@ def create_debt_excel(
     # Freeze header row
     ws.freeze_panes = 'A2'
 
-    # Add filter
-    ws.auto_filter.ref = f"A1:L{len(filtered_accounts) + 1}"
+    # Add filter (updated to include new column M)
+    ws.auto_filter.ref = f"A1:M{len(filtered_accounts) + 1}"
 
     # Save
     wb.save(output_path)
