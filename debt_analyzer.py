@@ -364,9 +364,10 @@ Respond with a JSON object only, no other text."""
 
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=300,  # Reduced - we want brief notes
-            temperature=0.1,  # Low for factual, deterministic output
-            top_p=0.9,  # Focus on most likely tokens
+            max_tokens=300,
+            temperature=0.1,
+            thinking={"type": "disabled"},
+            output_config={"effort": "low"},
             system=self.system_prompt,
             messages=[{"role": "user", "content": message}]
         )

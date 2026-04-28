@@ -148,6 +148,14 @@ The `teleos_client.py` analyzes transactions using:
 
 ## Version History
 
+### v1.2.0 (2026-04-28) - Sonnet 4.6 Migration
+- **Model upgraded** from `claude-sonnet-4-20250514` (original Sonnet 4.0) to `claude-sonnet-4-6` (current generation). Same price tier, improved intelligence. Model is env-driven via `CLAUDE_MODEL` for one-line rollback.
+- **API call cleanup** in `debt_analyzer.py:_ai_categorize`:
+  - Dropped `top_p=0.9` — Claude 4+ rejects requests passing both `temperature` and `top_p`. Kept `temperature=0.1` for deterministic JSON categorization.
+  - Added `thinking={"type": "disabled"}` for explicit-off behavior across model versions.
+  - Added `output_config={"effort": "low"}` — Sonnet 4.6 defaults to `high`, which would burn unnecessary latency/tokens on this short, deterministic classification task.
+- **SDK upgrade**: `anthropic>=0.25.0` → `anthropic>=0.97.0` (matches lab-app and case-app pins; older SDK predated the `output_config` keyword).
+
 ### v1.1.1 (2026-01-19) - Analysis Accuracy Improvements
 - **PAID accounts excluded from Excel** - No action needed for paid accounts, only shown on web
 - **Aging-aware notes**: MED/MED READY items in 30+ days aging now show "Not collected for X days - verify still required"
