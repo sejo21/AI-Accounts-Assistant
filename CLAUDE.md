@@ -146,7 +146,66 @@ The `teleos_client.py` analyzes transactions using:
    - Estimate items (prices in parentheses like `"General Anaesthetic (75.00)"`)
    - Non-balance-affecting entries: "Invoice X created", "Receipt X created", "Auth Code:", etc.
 
+## Future Work / TODO
+
+### Fully automate the weekly debt run (currently manual CSV)
+**Today (2026-06):** the weekly debt analysis is manual — a human runs the debtor
+report in Teleos, exports `mdebtor.CSV` to `/mnt/TELEVETLIVE`, then uploads it in
+the web app, which categorises each account. **Goal:** make it fully automatic —
+source the debtor list directly from Teleos (no human CSV export), run the
+categorisation, and produce the Excel / email on a schedule. The daily-report
+work (v1.3.0) already proves the building blocks: direct Teleos querying via MCP,
+Microsoft Graph email, and a cron schedule, all server-side.
+
+**⚠️ Critical finding before building this (2026-06-08, from the dropped cumulative experiment):**
+A naive cumulative query — `SUM(transaction Total − allocated payments)` over a
+date window — **over-reports debt and is NOT safe to use.** Proven by client
+`-1322844281` (Miss A Tibbles, BAD): she shows £1,204.80 of "unpaid" procedures
+(a Mar-2026 PYOMETRA £1,102.20 + Vetscan £102.60, both `Invoiced=0, Paid=0`,
+zero allocation) but her **actual `clientbalance.Balance` is £20.50.** Those
+charges were written off / never invoiced; the transaction-level "unpaid" maths
+doesn't know that. Lessons for automation:
+- **`clientbalance.Balance` is the ground truth** for what a client owes — not the
+  sum of un-allocated transactions. Old un-invoiced lines, write-offs, estimates,
+  and unallocated payments all make transaction-level "unpaid" diverge from the
+  real balance.
+- The **existing CSV debt run already handles this correctly** via the smart
+  balance-reconciliation in `teleos_client.get_outstanding_items` /
+  `_categorize_items` (it matches unpaid items against the actual balance and
+  drops items that don't contribute). Any automated debtor-sourcing MUST keep
+  that reconciliation — don't replace it with a naive transaction scan.
+- The **daily report (v1.3.0) is reliable despite this** only because it looks at
+  *fresh* charges (yesterday), where allocations reflect reality; the divergence
+  is a problem for *historical* cumulative scans, which is why the Monday
+  cumulative cross-check idea was dropped.
+- Likely automation path: query the debtor list from Teleos (e.g. `clientbalance`
+  WHERE Balance > threshold, joined to client/department) to replace the manual
+  `mdebtor.CSV` export, then feed those clients through the *existing*
+  per-account analyzer (`debt_analyzer` + `get_client_account_data`) unchanged.
+- **The actual mdebtor report SQL has been reverse-engineered** — see
+  `docs/teleos_aged_debtor_report.md`. It lives in `teleos3.exe` (native VB6 —
+  extract with `strings -e l`, .NET decompilers fail). That doc has the aging-bucket
+  logic, the `Procedure_ID` transaction-type semantics (2=charge, 8/9=payment),
+  HEJ's standard wizard answers mapped to the SQL placeholders, the
+  payment-netting that makes it reconcile to `clientbalance` (and dodge the
+  Tibbles over-report), and the legacy→MySQL column mapping. That's the blueprint
+  to port the debtor query to live MySQL for the automation.
+
 ## Version History
+
+### v1.3.0 (2026-06-08) - Prescription category fix + daily unpaid-procedure report
+- **Prescriptions now classed MED / MED READY, not PAY.** In Teleos a prescription/dispensing fee is logged as a Procedure (`Stock_or_Procedure='P'`) with `Details='PRESCRIPTION'`, so `analyze_transaction_types` was bucketing it as a procedure → PAY. Now a `P` line whose details contain "prescription" is treated as a stock/medication item, so it flows through the existing medication rules: **MED** (no collection/payment SMS) or **MED READY** (SMS sent). Verified against 4 live examples (all → MED READY). Single change in `teleos_client.py analyze_transaction_types`.
+- **New daily unpaid-procedure report** (`daily_report.py` + `email_service.py`) — emailed 07:00 daily to `accounts@` via cron, independent of the manual CSV-upload flow.
+  - Queries Teleos directly (read-only, MCP) for **procedure** charges (`Stock_or_Procedure='P'`, excluding `PRESCRIPTION`) dated **yesterday** that are still **unpaid** (payment-allocation logic, same as the categoriser).
+  - **Gate**: an account is included if it has ≥1 unpaid procedure from yesterday **AND** its overall `clientbalance` > £0 — the balance guard drops clients who are in credit / pre-paid via an unallocated deposit (the "Murray" case). Catches consults/treatments done but not settled at the desk.
+  - Email via Microsoft Graph (same Graph app as VetNotes-Sync; creds copied into `.env`). Sends **from and to** `accounts@heathandreachvets.co.uk`, **CC `sean.johnston@`** (`REPORT_CC_ADDRESSES`, comma-separated) — the Graph app has `Mail.Send` on the accounts mailbox (verified by live test).
+  - **Weekend handling**: `charge_dates_for()` — a Monday run covers Saturday + Sunday (the practice doesn't action the weekend reports); every other day covers just yesterday. Empty days still send (heartbeat).
+  - **Account-type column** (`get_client_department`: ACC/BAD/INS/INV/PAY/REF/RET/ZST). Row highlight: PAY = orange, BAD = red, INS = green; others unshaded. Legend in the email footer.
+  - **NOT cumulative** — a daily snapshot of procedures charged on the covered date(s) that are still unpaid. An item appears once (the morning after the charge); if it stays unpaid it does NOT re-appear next day (the full CSV debt run is the cumulative debtors view).
+  - `daily_report.py` runs standalone: `--dry-run` (build + print), `--date YYYY-MM-DD` (a specific charge date) for testing.
+  - New config: `GRAPH_TENANT_ID/CLIENT_ID/CLIENT_SECRET`, `REPORT_FROM_ADDRESS`, `REPORT_TO_ADDRESS`, `REPORT_ENABLED`. New dep: `msal`.
+  - Cron (user crontab): `0 7 * * * cd /home/sejo/AI-Accounts-Assistant && venv/bin/python daily_report.py >> output/daily_report.log 2>&1`
+  - Currently sends every day even when the list is empty (shows "No unpaid procedure charges"), acting as a heartbeat; flip to send-only-when-non-empty if that's noise.
 
 ### v1.2.0 (2026-04-28) - Sonnet 4.6 Migration
 - **Model upgraded** from `claude-sonnet-4-20250514` (original Sonnet 4.0) to `claude-sonnet-4-6` (current generation). Same price tier, improved intelligence. Model is env-driven via `CLAUDE_MODEL` for one-line rollback.

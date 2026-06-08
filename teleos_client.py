@@ -617,8 +617,18 @@ class TeleosClient:
                 result['has_stock_items'] = True
                 result['stock_items'].append(details)
             elif item_type == 'P':
-                result['has_procedures'] = True
-                result['procedure_items'].append(details)
+                # Prescription / dispensing fees are logged in Teleos as
+                # Procedure items (Details == "PRESCRIPTION") but for accounts
+                # purposes they behave like medication: the client owes for a
+                # script awaiting collection, so they should be MED (no SMS) /
+                # MED READY (collection/payment SMS sent), NOT PAY. Treat them
+                # as stock items so they flow through the medication rules.
+                if 'prescription' in details_lower:
+                    result['has_stock_items'] = True
+                    result['stock_items'].append(details)
+                else:
+                    result['has_procedures'] = True
+                    result['procedure_items'].append(details)
             elif item_type == 'N':
                 # Notes don't affect categorization - skip
                 continue

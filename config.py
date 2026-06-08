@@ -45,6 +45,22 @@ class Config:
     # Debt analysis settings
     MIN_BALANCE_THRESHOLD = 1.00  # Ignore balances under £1.00
 
+    # Microsoft Graph email (daily unpaid-procedure report). Same Graph app
+    # the practice's other tools use; creds copied from VetNotes-Sync.
+    GRAPH_TENANT_ID = os.getenv('GRAPH_TENANT_ID', '')
+    GRAPH_CLIENT_ID = os.getenv('GRAPH_CLIENT_ID', '')
+    GRAPH_CLIENT_SECRET = os.getenv('GRAPH_CLIENT_SECRET', '')
+    # Daily report sends from + to the accounts mailbox.
+    REPORT_FROM_ADDRESS = os.getenv('REPORT_FROM_ADDRESS', 'accounts@heathandreachvets.co.uk')
+    REPORT_TO_ADDRESS = os.getenv('REPORT_TO_ADDRESS', 'accounts@heathandreachvets.co.uk')
+    # Comma-separated CC list.
+    REPORT_CC_ADDRESSES = os.getenv('REPORT_CC_ADDRESSES', 'sean.johnston@heathandreachvets.co.uk')
+    REPORT_ENABLED = os.getenv('REPORT_ENABLED', 'true').lower() == 'true'
+
+    @classmethod
+    def is_email_configured(cls) -> bool:
+        return bool(cls.GRAPH_TENANT_ID and cls.GRAPH_CLIENT_ID and cls.GRAPH_CLIENT_SECRET)
+
     @classmethod
     def validate(cls) -> list:
         """Validate configuration and return list of errors."""
