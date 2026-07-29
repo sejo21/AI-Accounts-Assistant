@@ -1,6 +1,6 @@
 """Daily unpaid-procedure report.
 
-Queries Teleos directly (read-only, via MCP) for procedure charges dated
+Queries Teleos directly (read-only, direct MySQL via teleos_read) for procedure charges dated
 YESTERDAY that are still unpaid — i.e. consults / treatments done but not
 settled at the desk — and emails the list to the accounts mailbox.
 
@@ -200,7 +200,7 @@ def main():
 
     client = TeleosClient()
     if not client.health_check():
-        print("ERROR: Teleos MCP not reachable", file=sys.stderr)
+        print("ERROR: Teleos database not reachable", file=sys.stderr)
         sys.exit(1)
 
     results = find_unpaid_procedures(client, charge_dates)
