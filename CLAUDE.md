@@ -11,7 +11,7 @@ This document provides context for AI assistants working on this project.
 - **AI**: Anthropic Claude API (claude-sonnet-4)
 - **Database**: SQLite (accounts.db)
 - **Excel**: openpyxl for output generation
-- **Integration**: Teleos MCP server (localhost:3000)
+- **Integration**: Teleos direct MySQL via shared teleos_read module (/home/sejo/teleos-api) — migrated off the MCP server 2026-07-29; legacy MCP path behind `TELEOS_DATA_BACKEND=mcp`
 
 ## Architecture
 
@@ -25,8 +25,8 @@ This document provides context for AI assistants working on this project.
                    ▼            ▼            ▼
            ┌───────────┐ ┌───────────┐ ┌───────────┐
            │ Teleos    │ │ CSV File  │ │ SQLite    │
-           │ MCP Server│ │ /mnt/...  │ │ Database  │
-           │ (Port 3000)│ │           │ │           │
+           │ MySQL     │ │ /mnt/...  │ │ Database  │
+           │(teleos_read)│ │           │ │           │
            └───────────┘ └───────────┘ └───────────┘
 ```
 
@@ -37,7 +37,7 @@ This document provides context for AI assistants working on this project.
 | `app.py` | Flask application, routes, background analysis |
 | `config.py` | Configuration (ports, paths, API keys) |
 | `database.py` | SQLite operations for runs and accounts |
-| `teleos_client.py` | MCP client for Teleos queries (balance, SMS, transactions) |
+| `teleos_client.py` | Teleos data client — direct MySQL via teleos_read (balance, SMS, transactions); `_call_tool` dispatches on `TELEOS_DATA_BACKEND` (mysql default / mcp legacy rollback) |
 | `csv_parser.py` | Parse mdebtor.CSV from Teleos |
 | `debt_analyzer.py` | AI categorization logic with Claude |
 | `excel_generator.py` | Generate Excel output with categories |
@@ -85,15 +85,15 @@ lsof -ti:5003 | xargs kill
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ANTHROPIC_API_KEY` | Yes | - | Claude API key |
-| `MCP_HOST` | No | localhost | Teleos MCP server host |
-| `MCP_PORT` | No | 3000 | Teleos MCP server port |
+| `TELEOS_MYSQL_*` | Yes | - | Direct Teleos MySQL (host/port/user/password/database, read-only) |
+| `TELEOS_DATA_BACKEND` | No | mysql | `mcp` = legacy rollback path (MCP_HOST/PORT/API_KEY then apply) |
 | `FLASK_PORT` | No | 5003 | Flask server port |
 
 ## Related Projects
 
 - **AI-Case-Assistant**: Port 5002 - Veterinary case analysis
 - **AI-Lab-Reports**: Port 5000 - Lab report analysis
-- **Teleos MCP Server**: Port 3000 - Practice management integration
+- **teleos-api**: shared TelAPI client + teleos_read direct-MySQL module
 
 ## Excel Output Format
 
@@ -192,6 +192,19 @@ doesn't know that. Lessons for automation:
   to port the debtor query to live MySQL for the automation.
 
 ## Version History
+
+### v1.4.0 (2026-07-29) - Migrated off the MCP server to direct MySQL (MCP migration Step 4)
+- `teleos_client.py`: `_call_tool` dispatches on `TELEOS_DATA_BACKEND` — `mysql` (default)
+  routes the 3 tools + all `execute_custom_query` SQL through the shared `teleos_read` module
+  (read-only `claude_read`, param-bound); `mcp` is the legacy rollback path (one-line `.env`
+  change + restart; delete after burn-in). All public methods and callers unchanged.
+- **Verified with an exact two-backend diff on a live account** (balance £1331.70, INV
+  department, 50-txn history, outstanding + unpaid lists, SMS history): every row identical
+  except the two expected deltas — datetimes now correct naive UK-local (MCP shifted them
+  -1h during BST) and Decimals as floats instead of strings (all consumers `float()` them,
+  so no behavioural change).
+- No MCP dependency remains on the default path; `MCP_*` config retained only for the
+  rollback flag.
 
 ### v1.3.0 (2026-06-08) - Prescription category fix + daily unpaid-procedure report
 - **Prescriptions now classed MED / MED READY, not PAY.** In Teleos a prescription/dispensing fee is logged as a Procedure (`Stock_or_Procedure='P'`) with `Details='PRESCRIPTION'`, so `analyze_transaction_types` was bucketing it as a procedure → PAY. Now a `P` line whose details contain "prescription" is treated as a stock/medication item, so it flows through the existing medication rules: **MED** (no collection/payment SMS) or **MED READY** (SMS sent). Verified against 4 live examples (all → MED READY). Single change in `teleos_client.py analyze_transaction_types`.

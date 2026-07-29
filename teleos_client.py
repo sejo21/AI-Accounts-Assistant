@@ -1,13 +1,35 @@
-"""Teleos MCP HTTP client for retrieving client financial data."""
+"""Teleos data client for retrieving client financial data.
+
+MCP migration Step 4 (/home/sejo/MCP_MIGRATION_PLAN.md): data access goes
+through the shared direct-MySQL module teleos_read by default. The old MCP
+HTTP path is retained behind TELEOS_DATA_BACKEND=mcp as a rollback switch
+(one-line .env change + restart); delete it once the migration has burned in.
+
+The dispatch lives inside _call_tool so every public method is unchanged.
+Rows are normalised with teleos_read.jsonish_rows to the JSON-ish shapes the
+MCP server returned — but datetimes are correct naive UK-local, not MCP's
+UTC-shifted values.
+"""
 
 import json
+import os
+import sys
 import requests
 from typing import Optional, List, Dict
 from config import config
 
+# Shared read-only Teleos MySQL module (lives alongside the TelAPI client)
+if '/home/sejo/teleos-api' not in sys.path:
+    sys.path.insert(0, '/home/sejo/teleos-api')
+from teleos import teleos_read
+from teleos.teleos_read import TeleosReadError, jsonish_row, jsonish_rows
+
+# 'mysql' (default) = direct MySQL via teleos_read; 'mcp' = legacy HTTP path
+TELEOS_DATA_BACKEND = os.getenv('TELEOS_DATA_BACKEND', 'mysql').lower()
+
 
 class TeleosClient:
-    """HTTP client for communicating with the Teleos MCP server."""
+    """Teleos read client (direct MySQL by default; legacy MCP behind a flag)."""
 
     def __init__(self, host: str = None, port: int = None, api_key: str = None):
         self.host = host or config.MCP_HOST
@@ -24,7 +46,39 @@ class TeleosClient:
         return headers
 
     def _call_tool(self, tool_name: str, params: dict = None) -> dict:
-        """Call an MCP tool and return the result."""
+        """Execute a Teleos read tool. Dispatches on TELEOS_DATA_BACKEND."""
+        if TELEOS_DATA_BACKEND == 'mcp':
+            return self._call_tool_mcp(tool_name, params)
+        return self._call_tool_mysql(tool_name, params)
+
+    def _call_tool_mysql(self, tool_name: str, params: dict = None):
+        """Direct-MySQL implementations of the MCP tools this app uses.
+
+        Return shapes match the MCP JSON exactly (via jsonish_*), so all
+        callers are unchanged. Errors map onto TeleosConnectionError so the
+        existing except clauses keep working.
+        """
+        p = params or {}
+        try:
+            if tool_name == 'get_client_by_id':
+                return jsonish_row(teleos_read.get_client_by_id(p['clientId']))
+            if tool_name == 'get_financial_history':
+                return jsonish_rows(teleos_read.get_financial_history(p['clientId']))
+            if tool_name == 'get_client_outstanding_invoices':
+                return jsonish_rows(
+                    teleos_read.get_client_outstanding_invoices(p['clientId']))
+            if tool_name == 'execute_custom_query':
+                # limit=1000 mirrors the MCP tool's auto-LIMIT behaviour
+                return jsonish_rows(teleos_read.query(
+                    p['query'], limit=p.get('limit', 1000)))
+            raise TeleosConnectionError(f"Unknown Teleos tool: {tool_name}")
+        except TeleosReadError as e:
+            raise TeleosConnectionError(f"Teleos MySQL query failed: {e}")
+        except KeyError as e:
+            raise TeleosConnectionError(f"Missing parameter for {tool_name}: {e}")
+
+    def _call_tool_mcp(self, tool_name: str, params: dict = None) -> dict:
+        """LEGACY: call an MCP tool over HTTP (TELEOS_DATA_BACKEND=mcp only)."""
         url = f"{self.base_url}/tools/{tool_name}"
         try:
             response = requests.post(
@@ -51,14 +105,17 @@ class TeleosClient:
             raise TeleosParseError(f"Failed to parse Teleos response: {e}")
 
     def health_check(self) -> bool:
-        """Check if the MCP server is running."""
+        """Check the Teleos data source is reachable."""
+        if TELEOS_DATA_BACKEND == 'mcp':
+            try:
+                response = requests.get(f"{self.base_url}/health", timeout=5)
+                return response.status_code == 200
+            except requests.exceptions.RequestException:
+                return False
         try:
-            response = requests.get(
-                f"{self.base_url}/health",
-                timeout=5
-            )
-            return response.status_code == 200
-        except requests.exceptions.RequestException:
+            teleos_read.query("SELECT 1")
+            return True
+        except Exception:
             return False
 
     def execute_custom_query(self, query: str) -> List[dict]:
