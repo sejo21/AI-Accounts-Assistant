@@ -365,7 +365,7 @@ Respond with a JSON object only, no other text."""
         response = self.client.messages.create(
             model=self.model,
             max_tokens=300,
-            temperature=0.1,
+            # temperature removed: deprecated on claude-sonnet-5 (2026-07-29)
             thinking={"type": "disabled"},
             output_config={"effort": "low"},
             system=self.system_prompt,
